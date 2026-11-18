@@ -1,0 +1,5 @@
+{
+  "name": "Sistema de Comprobantes de Pago",
+  "description": "Sistema de gestión de comprobantes de pago para la Sociedad de Beneficencia Pública, incluyendo control presupuestal y patrimonial.",
+  "requestFramePermissions": []
+}

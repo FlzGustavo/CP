@@ -1,0 +1,703 @@
+// Google Apps Script Code for Payment Voucher System
+// Set this to your own spreadsheet ID before deployment.
+// Last Updated: 2026-04-18 (Updated Hierarchical Accounts & Validations)
+
+const SPREADSHEET_ID = 'YOUR_SPREADSHEET_ID';
+
+/**
+ * Setup function to initialize the database structure.
+ * Creates necessary sheets and headers if they don't exist.
+ * RUN THIS FUNCTION FIRST!
+ */
+function setup() {
+  let ss;
+  try {
+    ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  } catch (e) {
+    Logger.log("No se pudo abrir la hoja de cálculo con ID: " + SPREADSHEET_ID);
+    Logger.log("Error: " + e.toString());
+    Logger.log("Intentando usar la hoja activa (si el script está vinculado)...");
+    try {
+      ss = SpreadsheetApp.getActiveSpreadsheet();
+    } catch (e2) {
+      // Ignore
+    }
+    
+    if (!ss) {
+      Logger.log("Creando una NUEVA hoja de cálculo...");
+      ss = SpreadsheetApp.create("Sistema de Comprobantes DB");
+      Logger.log("****************************************************************");
+      Logger.log("NUEVA HOJA CREADA. ID: " + ss.getId());
+      Logger.log("POR FAVOR ACTUALIZA LA CONSTANTE 'SPREADSHEET_ID' EN EL CÓDIGO CON ESTE NUEVO ID.");
+      Logger.log("****************************************************************");
+    }
+  }
+  
+  if (!ss) {
+    throw new Error("No se pudo obtener ni crear una hoja de cálculo.");
+  }
+  
+  // 1. Setup Users Sheet
+  setupSheet_(ss, 'Users', [
+    'id',
+    'username',
+    'password',
+    'fullName',
+    'role',
+    'status',
+    'createdAt',
+    'lastLogin'
+  ]);
+
+  // 2. Setup Vouchers Sheet
+  setupSheet_(ss, 'Vouchers', [
+    'id',
+    'number',
+    'date',             // Stored as YYYY-MM-DD, displayed as DD/MM/YYYY in frontend
+    'payeeName',
+    'amount',
+    'amountInWords',
+    'concept',
+    'budgetCode',       // Stored as JSON string
+    'budgetAccounting', // Stored as JSON string
+    'financialAccounting', // Stored as JSON string
+    'expenseObjects',   // Stored as JSON string
+    'total',
+    'deductions',
+    'netPayable',
+    'paymentMethod',
+    'chequeNumber',
+    'treasurerDate',
+    'treasurerName',
+    'receiverDni',
+    'receiverRuc',
+    'receiverDate',
+    'createdAt',        // Stored as ISO string (YYYY-MM-DDTHH:mm:ss.sssZ), displayed as DD/MM/YYYY in frontend
+    'createdBy',
+    'status',
+    'paymentDate',
+    'paymentAmount',
+    'deletedAt',
+    'deletedBy',
+    'deleteReason'
+  ]);
+
+  // 3. Setup Settings Sheet
+  setupSheet_(ss, 'Settings', [
+    'key',
+    'value'
+  ]);
+
+  // 4. Setup Unified Sheets
+  setupSheet_(ss, 'Clasificadores', ['TIPO', 'Año', 'GENÉRICA', 'SUBGENÉRICA', 'SUBSUBGENÉRICA', 'CLASIFICADOR', 'DESCRIPCION']);
+  setupSheet_(ss, 'CuentasContables', ['TIPO', 'GENÉRICA', 'SUBGENÉRICA', 'CUENTA', 'DESCRIPCION']);
+  setupSheet_(ss, 'FuentesFinanciamiento', ['FUENTE', 'RUBRO']);
+  setupSheet_(ss, 'Proveedores', ['ID', 'RUC', 'DNI', 'NOMBRE', 'DIRECCIÓN', 'TELÉFONO', 'ESTADO']);
+  setupSheet_(ss, 'CadenaProgramatica', ['ID', 'PARENT_ID', 'TYPE', 'CODE', 'DESCRIPTION']);
+
+  // 5. Setup Master Type Sheets
+  setupSheet_(ss, 'TiposClasificadores', ['NOMBRE']);
+  setupSheet_(ss, 'TiposCuentas', ['NOMBRE']);
+  setupSheet_(ss, 'NombresFuentes', ['NOMBRE']);
+  
+  // Initialize default types if empty
+  initializeMasterTypes_(ss);
+  
+  // Create default admin user if not exists
+  createDefaultAdmin_(ss);
+}
+
+/**
+ * Initialize default master types if they are empty
+ */
+function initializeMasterTypes_(ss) {
+  const cTypes = ss.getSheetByName('TiposClasificadores');
+  if (cTypes.getLastRow() <= 1) {
+    cTypes.appendRow(['INGRESOS']);
+    cTypes.appendRow(['GASTOS']);
+  }
+  
+  const aTypes = ss.getSheetByName('TiposCuentas');
+  if (aTypes.getLastRow() <= 1) {
+    aTypes.appendRow(['INGRESOS']);
+    aTypes.appendRow(['GASTOS']);
+    aTypes.appendRow(['PRESUPUESTO']);
+    aTypes.appendRow(['ORDEN']);
+  }
+}
+
+/**
+ * Helper function to format date as DD/MM/YYYY
+ */
+function formatDate_(value) {
+  if (!value) return '';
+  
+  // Handle YYYY-MM-DD specifically to avoid timezone shifts
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const parts = value.split('-');
+    return `${parts[2]}/${parts[1]}/${parts[0]}`;
+  }
+
+  const date = new Date(value);
+  if (isNaN(date.getTime())) return value;
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const year = date.getFullYear();
+  return `${day}/${month}/${year}`;
+}
+
+/**
+ * Helper function to create a sheet with headers if it doesn't exist.
+ * Private function (ends with _) to avoid showing in run menu.
+ */
+function setupSheet_(ss, sheetName, headers) {
+  let sheet = ss.getSheetByName(sheetName);
+  
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+    // Remove default Sheet1 if it exists and we just created the first custom sheet
+    const defaultSheet = ss.getSheetByName('Hoja 1') || ss.getSheetByName('Sheet1');
+    if (defaultSheet && ss.getSheets().length > 1) {
+      // Optional: delete default sheet if desired
+    }
+    
+    // New sheet, set headers
+    const range = sheet.getRange(1, 1, 1, headers.length);
+    range.setValues([headers]);
+    sheet.setFrozenRows(1);
+    range.setFontWeight('bold');
+    range.setBackground('#f3f4f6'); // Light gray background
+  } else {
+    // Sheet exists, check for missing headers and append them
+    const lastCol = sheet.getLastColumn();
+    if (lastCol > 0) {
+      const currentHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+      const missingHeaders = headers.filter(h => !currentHeaders.includes(h));
+      
+      if (missingHeaders.length > 0) {
+        Logger.log(`Adding missing headers to ${sheetName}: ${missingHeaders.join(', ')}`);
+        const startCol = lastCol + 1;
+        const range = sheet.getRange(1, startCol, 1, missingHeaders.length);
+        range.setValues([missingHeaders]);
+        range.setFontWeight('bold');
+        range.setBackground('#f3f4f6');
+      }
+    } else {
+      // Sheet exists but is empty
+      const range = sheet.getRange(1, 1, 1, headers.length);
+      range.setValues([headers]);
+      sheet.setFrozenRows(1);
+      range.setFontWeight('bold');
+      range.setBackground('#f3f4f6');
+    }
+  }
+}
+
+/**
+ * Create default admin user
+ */
+function createDefaultAdmin_(ss) {
+  const sheet = ss.getSheetByName('Users');
+  const data = sheet.getDataRange().getValues();
+  
+  // Check if any user exists (header is row 1, so length > 1 means data exists)
+  if (data.length <= 1) {
+    const adminPassword = Utilities.getUuid();
+    const adminUser = [
+      'admin-id-123', // id
+      'admin',        // username
+      adminPassword,  // password
+      'Administrador',// fullName
+      'ADMIN',        // role
+      'ACTIVE',       // status
+      new Date().toISOString(), // createdAt
+      ''              // lastLogin
+    ];
+    sheet.appendRow(adminUser);
+    Logger.log("Usuario 'admin' creado. Contraseña inicial: " + adminPassword);
+  }
+}
+
+/**
+ * Entry point for GET requests (Read operations)
+ */
+function doGet(e) {
+  try {
+    // If no action parameter, serve the React App
+    if (!e || !e.parameter || !e.parameter.action) {
+      return HtmlService.createTemplateFromFile('index')
+        .evaluate()
+        .setTitle('Sistema de Comprobantes de Pago')
+        .addMetaTag('viewport', 'width=device-width, initial-scale=1')
+        .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+    }
+
+    const action = e.parameter.action;
+    
+    if (action === 'getUsers') {
+      return ContentService.createTextOutput(JSON.stringify(getUsersData())).setMimeType(ContentService.MimeType.JSON);
+    } else if (action === 'getVouchers') {
+      return ContentService.createTextOutput(JSON.stringify(getVouchersData())).setMimeType(ContentService.MimeType.JSON);
+    } else if (action === 'getSettings') {
+      return ContentService.createTextOutput(JSON.stringify(getSettingsData())).setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    return ContentService.createTextOutput(JSON.stringify({ error: 'Invalid action' })).setMimeType(ContentService.MimeType.JSON);
+  } catch (error) {
+    return ContentService.createTextOutput(JSON.stringify({ error: error.toString() })).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+/**
+ * Entry point for POST requests (Create/Update/Delete operations)
+ */
+function doPost(e) {
+  try {
+    const data = JSON.parse(e.postData.contents);
+    const action = data.action;
+    let result;
+    
+    if (action === 'saveVoucher') {
+      result = saveVoucherData(data.voucher);
+    } else if (action === 'deleteVoucher') {
+      result = deleteVoucherData(data.id, data.reason, data.user);
+    } else if (action === 'login') {
+      result = loginData(data.username, data.password);
+    } else if (action === 'saveUser') {
+      result = saveUserData(data.user);
+    } else if (action === 'deleteUser') {
+      result = deleteUserData(data.id);
+    } else if (action === 'saveSettings') {
+      result = saveSettingsData(data.settings);
+    } else {
+      return ContentService.createTextOutput(JSON.stringify({ error: 'Invalid action' })).setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    return ContentService.createTextOutput(JSON.stringify(result)).setMimeType(ContentService.MimeType.JSON);
+    
+  } catch (error) {
+    return ContentService.createTextOutput(JSON.stringify({ error: error.toString() })).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+// --- Public Functions for google.script.run ---
+
+function apiGetUsers() {
+  return getUsersData();
+}
+
+function apiGetVouchers() {
+  return getVouchersData();
+}
+
+function apiSaveVoucher(voucher) {
+  return saveVoucherData(voucher);
+}
+
+function apiDeleteVoucher(id, reason, user) {
+  return deleteVoucherData(id, reason, user);
+}
+
+function apiLogin(username, password) {
+  return loginData(username, password);
+}
+
+function apiSaveUser(user) {
+  return saveUserData(user);
+}
+
+function apiDeleteUser(id) {
+  return deleteUserData(id);
+}
+
+function apiGetSettings() {
+  return getSettingsData();
+}
+
+function apiSaveSettings(settings) {
+  return saveSettingsData(settings);
+}
+
+// --- Helper Functions for Data Access (Logic Only) ---
+
+function getUsersData() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName('Users');
+  if (!sheet) return [];
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return [];
+
+  const headers = data.shift();
+  
+  const users = data.map(row => {
+    let user = {};
+    headers.forEach((header, index) => {
+      if (header === 'createdAt' || header === 'lastLogin') {
+        user[header] = formatDate_(row[index]);
+      } else {
+        user[header] = row[index];
+      }
+    });
+    return user;
+  });
+  
+  return users;
+}
+
+function getVouchersData() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName('Vouchers');
+  if (!sheet) return [];
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return [];
+
+  const headers = data.shift();
+  
+  const vouchers = data.map(row => {
+    let voucher = {};
+    headers.forEach((header, index) => {
+      // Parse JSON fields
+      if (['budgetCode', 'budgetAccounting', 'financialAccounting', 'expenseObjects'].includes(header)) {
+        try {
+          voucher[header] = JSON.parse(row[index]);
+        } catch (e) {
+          voucher[header] = null;
+        }
+      } else if (['date', 'treasurerDate', 'receiverDate', 'createdAt', 'paymentDate', 'deletedAt'].includes(header)) {
+        voucher[header] = formatDate_(row[index]);
+      } else {
+        // Ensure numeric fields are numbers
+        if (['amount', 'total', 'deductions', 'netPayable', 'paymentAmount'].includes(header)) {
+          const val = Number(row[index]);
+          voucher[header] = isNaN(val) ? 0 : val;
+        } else {
+          voucher[header] = row[index];
+        }
+      }
+    });
+    return voucher;
+  });
+  
+  return vouchers;
+}
+
+function saveVoucherData(voucherData) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName('Vouchers');
+  if (!sheet) throw new Error("Sheet 'Vouchers' not found. Run setup() first.");
+
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  
+  // Check if voucher exists to update
+  const data = sheet.getDataRange().getValues();
+  let rowIndex = -1;
+  
+  // Skip header row (index 0), start from 1
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] === voucherData.id) { // Assuming 'id' is first column
+      rowIndex = i + 1; // 1-based index for Sheet API
+      break;
+    }
+  }
+  
+  const rowValues = headers.map(header => {
+    const val = voucherData[header];
+    if (typeof val === 'object' && val !== null) {
+      return JSON.stringify(val);
+    }
+    return val === undefined ? '' : val;
+  });
+  
+  if (rowIndex > 0) {
+    // Update existing
+    sheet.getRange(rowIndex, 1, 1, rowValues.length).setValues([rowValues]);
+  } else {
+    // Create new
+    sheet.appendRow(rowValues);
+  }
+  
+  return { success: true, id: voucherData.id };
+}
+
+function deleteVoucherData(id, reason, user) {
+   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+   const sheet = ss.getSheetByName('Vouchers');
+   if (!sheet) throw new Error("Sheet 'Vouchers' not found.");
+
+   const data = sheet.getDataRange().getValues();
+   let rowIndex = -1;
+   
+   for (let i = 1; i < data.length; i++) {
+     if (data[i][0] === id) {
+       rowIndex = i + 1;
+       break;
+     }
+   }
+   
+   if (rowIndex > 0) {
+     // Find column indices for status, deletedAt, deletedBy, deleteReason
+     const headers = data[0];
+     const statusIdx = headers.indexOf('status');
+     const deletedAtIdx = headers.indexOf('deletedAt');
+     const deletedByIdx = headers.indexOf('deletedBy');
+     const deleteReasonIdx = headers.indexOf('deleteReason');
+     
+     if (statusIdx > -1) sheet.getRange(rowIndex, statusIdx + 1).setValue('anulado');
+     if (deletedAtIdx > -1) sheet.getRange(rowIndex, deletedAtIdx + 1).setValue(new Date().toISOString());
+     if (deletedByIdx > -1) sheet.getRange(rowIndex, deletedByIdx + 1).setValue(user);
+     if (deleteReasonIdx > -1) sheet.getRange(rowIndex, deleteReasonIdx + 1).setValue(reason);
+     
+     return { success: true };
+   }
+   
+   return { success: false, error: 'Voucher not found' };
+}
+
+function saveUserData(userData) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName('Users');
+  if (!sheet) throw new Error("Sheet 'Users' not found. Run setup() first.");
+
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  
+  const data = sheet.getDataRange().getValues();
+  let rowIndex = -1;
+  
+  // Check if user exists to update (if ID is provided)
+  if (userData.id) {
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][0] === userData.id) {
+        rowIndex = i + 1;
+        break;
+      }
+    }
+  }
+  
+  // If creating new user (no ID or ID not found, though usually update has ID)
+  if (!userData.id || rowIndex === -1) {
+    // Generate new ID: admin-id-125 incrementing
+    let maxId = 124; // Start base so next is 125
+    
+    // Scan existing IDs to find max
+    for (let i = 1; i < data.length; i++) {
+      const currentId = String(data[i][0]);
+      if (currentId.startsWith('admin-id-')) {
+        const numPart = parseInt(currentId.replace('admin-id-', ''), 10);
+        if (!isNaN(numPart) && numPart > maxId) {
+          maxId = numPart;
+        }
+      }
+    }
+    
+    userData.id = 'admin-id-' + (maxId + 1);
+  }
+  
+  const rowValues = headers.map(header => {
+    const val = userData[header];
+    return val === undefined ? '' : val;
+  });
+  
+  if (rowIndex > 0) {
+    sheet.getRange(rowIndex, 1, 1, rowValues.length).setValues([rowValues]);
+  } else {
+    sheet.appendRow(rowValues);
+  }
+  
+  return { success: true, id: userData.id };
+}
+
+function deleteUserData(id) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName('Users');
+  if (!sheet) throw new Error("Sheet 'Users' not found.");
+
+  const data = sheet.getDataRange().getValues();
+  let rowIndex = -1;
+  
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] === id) {
+      rowIndex = i + 1;
+      break;
+    }
+  }
+  
+  if (rowIndex > 0) {
+    sheet.deleteRow(rowIndex);
+    return { success: true };
+  }
+  
+  return { success: false, error: 'User not found' };
+}
+
+function loginData(username, password) {
+  // Basic login check against Users sheet
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName('Users');
+  if (!sheet) return { success: false, message: 'Database not initialized' };
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return { success: false, message: 'No users found' };
+
+  const headers = data.shift();
+  
+  const user = data.find(row => row[1] === username && row[2] === password); // 1=username, 2=password
+  
+  if (user) {
+     let userObj = {};
+     headers.forEach((header, index) => {
+       userObj[header] = user[index];
+     });
+     return { success: true, user: userObj };
+  }
+  
+  return { success: false, message: 'Invalid credentials' };
+}
+
+function getSettingsData() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName('Settings');
+  let settings = {};
+
+  if (sheet) {
+    const data = sheet.getDataRange().getValues();
+    if (data.length >= 2) {
+      for (let i = 1; i < data.length; i++) {
+        const key = data[i][0];
+        const value = data[i][1];
+        try {
+          settings[key] = JSON.parse(value);
+        } catch (e) {
+          settings[key] = value;
+        }
+      }
+    }
+  }
+
+  // Load Unified Structured Lists
+  settings.classifiers = getSheetDataAsObjects_(ss, 'Clasificadores', { 'TIPO': 'type', 'Año': 'year', 'GENÉRICA': 'generic', 'SUBGENÉRICA': 'subgeneric', 'SUBSUBGENÉRICA': 'subsubgeneric', 'CLASIFICADOR': 'code', 'DESCRIPCION': 'description' });
+  settings.accounts = getSheetDataAsObjects_(ss, 'CuentasContables', { 'TIPO': 'type', 'GENÉRICA': 'generic', 'SUBGENÉRICA': 'subgeneric', 'CUENTA': 'code', 'DESCRIPCION': 'description' });
+  settings.fundingSources = getSheetDataAsObjects_(ss, 'FuentesFinanciamiento', { 'FUENTE': 'source', 'RUBRO': 'category' });
+  settings.suppliers = getSheetDataAsObjects_(ss, 'Proveedores', { 'ID': 'id', 'RUC': 'ruc', 'DNI': 'dni', 'NOMBRE': 'name', 'DIRECCIÓN': 'address', 'TELÉFONO': 'phone', 'ESTADO': 'status' });
+  settings.programmaticNodes = getSheetDataAsObjects_(ss, 'CadenaProgramatica', { 'ID': 'id', 'PARENT_ID': 'parentId', 'TYPE': 'type', 'CODE': 'code', 'DESCRIPTION': 'description' });
+
+  // Load Masters
+  settings.classifierTypes = getSheetList_(ss, 'TiposClasificadores');
+  settings.accountTypes = getSheetList_(ss, 'TiposCuentas');
+  settings.fundingSourceNames = getSheetList_(ss, 'NombresFuentes');
+
+  return settings;
+}
+
+function getSheetList_(ss, sheetName) {
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return [];
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return [];
+  data.shift(); // Remove header
+  return data.map(row => row[0]).filter(val => val !== '');
+}
+
+/**
+ * Generic helper to read a sheet and map headers to object keys
+ */
+function getSheetDataAsObjects_(ss, sheetName, mapping) {
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return [];
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return [];
+  const headers = data.shift();
+  return data.map(row => {
+    let obj = {};
+    headers.forEach((h, i) => {
+      const key = mapping[h] || h.toLowerCase();
+      obj[key] = row[i];
+    });
+    return obj;
+  });
+}
+
+function saveSettingsData(settings) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName('Settings');
+  if (!sheet) throw new Error("Sheet 'Settings' not found.");
+
+  // Identify structured lists to save in dedicated sheets
+  const structuredLists = {
+    classifiers: { name: 'Clasificadores', headers: ['TIPO', 'Año', 'GENÉRICA', 'SUBGENÉRICA', 'SUBSUBGENÉRICA', 'CLASIFICADOR', 'DESCRIPCION'], keys: ['type', 'year', 'generic', 'subgeneric', 'subsubgeneric', 'code', 'description'] },
+    accounts: { name: 'CuentasContables', headers: ['TIPO', 'GENÉRICA', 'SUBGENÉRICA', 'CUENTA', 'DESCRIPCION'], keys: ['type', 'generic', 'subgeneric', 'code', 'description'] },
+    fundingSources: { name: 'FuentesFinanciamiento', headers: ['FUENTE', 'RUBRO'], keys: ['source', 'category'] },
+    suppliers: { name: 'Proveedores', headers: ['ID', 'RUC', 'DNI', 'NOMBRE', 'DIRECCIÓN', 'TELÉFONO', 'ESTADO'], keys: ['id', 'ruc', 'dni', 'name', 'address', 'phone', 'status'] },
+    programmaticNodes: { name: 'CadenaProgramatica', headers: ['ID', 'PARENT_ID', 'TYPE', 'CODE', 'DESCRIPTION'], keys: ['id', 'parentId', 'type', 'code', 'description'] }
+  };
+
+  const masters = {
+    classifierTypes: 'TiposClasificadores',
+    accountTypes: 'TiposCuentas',
+    fundingSourceNames: 'NombresFuentes'
+  };
+
+  // 1. Save structured sheets
+  for (const [key, config] of Object.entries(structuredLists)) {
+    if (settings[key]) {
+      saveToSheet_(ss, config.name, config.headers, settings[key], config.keys);
+      delete settings[key];
+    }
+  }
+
+  // 2. Save masters
+  for (const [key, sheetName] of Object.entries(masters)) {
+    if (settings[key]) {
+      saveListToSheet_(ss, sheetName, settings[key], 'NOMBRE');
+      delete settings[key];
+    }
+  }
+
+  // 3. Rewrite generic settings
+  sheet.clear();
+  sheet.appendRow(['key', 'value']);
+  sheet.setFrozenRows(1);
+  sheet.getRange(1, 1, 1, 2).setFontWeight('bold').setBackground('#f3f4f6');
+
+  for (const key in settings) {
+    let value = settings[key];
+    if (typeof value === 'object' && value !== null) {
+      value = JSON.stringify(value);
+    }
+    sheet.appendRow([key, value]);
+  }
+
+  SpreadsheetApp.flush();
+  return { success: true };
+}
+
+function saveListToSheet_(ss, sheetName, list, headerName) {
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return;
+  sheet.clear();
+  sheet.appendRow([headerName]);
+  sheet.setFrozenRows(1);
+  sheet.getRange(1, 1, 1, 1).setFontWeight('bold').setBackground('#f3f4f6');
+  if (list && list.length > 0) {
+    const rows = list.map(item => [item]);
+    sheet.getRange(2, 1, rows.length, 1).setValues(rows);
+  }
+}
+
+/**
+ * Generic helper to save an array of objects to a sheet
+ */
+function saveToSheet_(ss, sheetName, headers, items, keys) {
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return;
+  sheet.clear();
+  sheet.appendRow(headers);
+  sheet.setFrozenRows(1);
+  sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#f3f4f6');
+  
+  if (items.length > 0) {
+    const values = items.map(item => keys.map(k => item[k] || ''));
+    sheet.getRange(2, 1, values.length, headers.length).setValues(values);
+  }
+}

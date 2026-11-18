@@ -1,0 +1,45 @@
+import tailwindcss from '@tailwindcss/vite';
+import react from '@vitejs/plugin-react';
+import path from 'path';
+import {defineConfig, loadEnv} from 'vite';
+import { viteSingleFile } from "vite-plugin-singlefile";
+
+export default defineConfig(({mode}) => {
+  const env = loadEnv(mode, '.', '');
+  return {
+    plugins: [react(), tailwindcss(), viteSingleFile()],
+    define: {
+      'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+    },
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, '.'),
+      },
+    },
+    server: {
+      // HMR is disabled in AI Studio via DISABLE_HMR env var.
+      // Do not modifyâ€”file watching is disabled to prevent flickering during agent edits.
+      hmr: process.env.DISABLE_HMR !== 'true',
+    },
+    build: {
+      target: "es2015",
+      assetsInlineLimit: 100000000,
+      chunkSizeWarningLimit: 100000000,
+      cssCodeSplit: false,
+      brotliSize: false,
+      sourcemap: false,
+      minify: 'terser',
+      terserOptions: {
+        compress: {
+          drop_console: false, // Keep console logs for debugging
+          drop_debugger: true,
+        },
+        format: {
+          comments: false,
+          ascii_only: true, // Ensure only ASCII characters
+          max_line_len: 4000, // Avoid extremely long lines
+        },
+      },
+    },
+  };
+});
